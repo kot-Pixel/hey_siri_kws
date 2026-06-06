@@ -1,0 +1,84 @@
+# Build libhey_siri_kws.so for Android ARM.
+# Output: dist/<abi>/lib/libhey_siri_kws.so + dist/<abi>/include/hey_siri_kws.h
+param(
+    [string]$Abi = "arm64-v8a",
+    [int]$ApiLevel = 24,
+    [string]$NdkRoot = $env:ANDROID_NDK_HOME
+)
+
+$ErrorActionPreference = "Stop"
+$Root = Split-Path -Parent $PSScriptRoot
+$BuildDir = Join-Path $Root "build\$Abi"
+$DistDir = Join-Path $Root "dist\$Abi"
+
+if (-not $NdkRoot -or -not (Test-Path $NdkRoot)) {
+    $SdkNdk = Join-Path $env:LOCALAPPDATA "Android\Sdk\ndk"
+    if (Test-Path $SdkNdk) {
+        $NdkRoot = (Get-ChildItem $SdkNdk -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
+    }
+}
+if (-not $NdkRoot -or -not (Test-Path $NdkRoot)) {
+    throw "Set ANDROID_NDK_HOME to Android NDK path."
+}
+
+$Toolchain = Join-Path $NdkRoot "build\cmake\android.toolchain.cmake"
+if (-not (Test-Path $Toolchain)) {
+    throw "NDK cmake toolchain not found: $Toolchain"
+}
+
+# Embed model
+$ModelSrc = Join-Path $Root "model\stream_state_internal.tflite"
+$ModelDst = Join-Path $Root "src\model_data.cc"
+if (-not (Test-Path $ModelSrc)) {
+    throw "Missing model: $ModelSrc"
+}
+python (Join-Path $Root "scripts\embed_tflite.py") $ModelSrc $ModelDst
+
+# Download TFLite deps if needed
+$TfliteLibDir = Join-Path $Root "third_party\tflite\lib\$Abi"
+$TfliteLib = Join-Path $TfliteLibDir "libtensorflowlite_jni.so"
+if (-not (Test-Path $TfliteLib)) {
+    $TfliteLib = Join-Path $TfliteLibDir "libtensorflowlite.so"
+}
+if (-not (Test-Path $TfliteLib)) {
+    & (Join-Path $Root "scripts\prepare_deps.ps1")
+}
+
+New-Item -ItemType Directory -Force -Path $BuildDir, "$DistDir\lib", "$DistDir\include" | Out-Null
+
+cmake -S $Root -B $BuildDir `
+    -G "Ninja" `
+    -DCMAKE_TOOLCHAIN_FILE="$Toolchain" `
+    -DANDROID_ABI="$Abi" `
+    -DANDROID_PLATFORM="android-$ApiLevel" `
+    -DANDROID_STL=c++_shared `
+    -DTFLITE_ROOT="$(Join-Path $Root 'third_party\tflite')" `
+    -DCMAKE_BUILD_TYPE=Release `
+    -DCMAKE_INSTALL_PREFIX="$DistDir"
+
+cmake --build $BuildDir
+if ($LASTEXITCODE -ne 0) { throw "cmake --build failed" }
+
+cmake --install $BuildDir
+if ($LASTEXITCODE -ne 0) { throw "cmake --install failed" }
+
+Write-Host ""
+Write-Host "=== Build OK ==="
+Write-Host "  $($DistDir)\lib\libhey_siri_kws.so"
+Write-Host "  $($DistDir)\include\hey_siri_kws.h"
+Write-Host ""
+$RuntimeLibDir = Join-Path $Root "dist\$Abi\runtime"
+New-Item -ItemType Directory -Force -Path $RuntimeLibDir | Out-Null
+Copy-Item "$TfliteLibDir\libtensorflowlite_jni.so" $RuntimeLibDir -Force -ErrorAction SilentlyContinue
+Copy-Item "$TfliteLibDir\libtensorflowlite.so" $RuntimeLibDir -Force -ErrorAction SilentlyContinue
+Copy-Item "$TfliteLibDir\libtensorflowlite_flex_jni.so" $RuntimeLibDir -Force -ErrorAction SilentlyContinue
+$CppShared = Join-Path $NdkRoot "toolchains\llvm\prebuilt\windows-x86_64\sysroot\usr\lib\$Abi\libc++_shared.so"
+if (Test-Path $CppShared) {
+    Copy-Item $CppShared $RuntimeLibDir -Force
+}
+
+Write-Host "Runtime deps (ship with your APK):"
+Write-Host "  $($RuntimeLibDir)\"
+Write-Host "    libtensorflowlite_jni.so"
+Write-Host "    libtensorflowlite_flex_jni.so"
+Write-Host "    libc++_shared.so"
