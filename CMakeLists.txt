@@ -8,8 +8,13 @@ set(TFLITE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tflite" CACHE PATH "Ten
 
 add_library(hey_siri_kws SHARED
     src/hey_siri_kws.cpp
-    src/flex_delegate_loader.cpp
     src/model_data.cc
+    src/mfcc_extractor.cpp
+    src/mfcc/spectrogram.cc
+    src/mfcc/mfcc.cc
+    src/mfcc/mfcc_mel_filterbank.cc
+    src/mfcc/mfcc_dct.cc
+    third_party/fft2d/fftsg.c
 )
 
 target_include_directories(hey_siri_kws
@@ -17,6 +22,8 @@ target_include_directories(hey_siri_kws
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
     PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fft2d
         ${TFLITE_ROOT}/include
 )
 
@@ -35,16 +42,6 @@ target_link_libraries(hey_siri_kws
     ${LOG_LIB}
     ${TFLITE_CORE_LIB}
 )
-
-if(EXISTS "${TFLITE_ROOT}/lib/${ANDROID_ABI}/libtensorflowlite_flex_jni.so")
-  target_link_libraries(hey_siri_kws
-      ${TFLITE_ROOT}/lib/${ANDROID_ABI}/libtensorflowlite_flex_jni.so)
-elseif(EXISTS "${TFLITE_ROOT}/lib/${ANDROID_ABI}/libtensorflowlite_flex.so")
-  target_link_libraries(hey_siri_kws
-      ${TFLITE_ROOT}/lib/${ANDROID_ABI}/libtensorflowlite_flex.so)
-else()
-  message(FATAL_ERROR "Missing Flex delegate for ${ANDROID_ABI}. Run scripts/prepare_deps.ps1")
-endif()
 
 target_compile_options(hey_siri_kws PRIVATE -Wall -Wextra -O3)
 

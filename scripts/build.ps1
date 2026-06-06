@@ -1,5 +1,5 @@
 # Build libhey_siri_kws.so for Android ARM.
-# Output: dist/<abi>/lib/libhey_siri_kws.so + dist/<abi>/include/hey_siri_kws.h
+# Output: dist/<abi>/{lib,include,runtime}/
 param(
     [string]$Abi = "arm64-v8a",
     [int]$ApiLevel = 24,
@@ -10,6 +10,16 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $Root "build\$Abi"
 $DistDir = Join-Path $Root "dist\$Abi"
+
+function Get-NdkTriple($AbiName) {
+    switch ($AbiName) {
+        "arm64-v8a" { return "aarch64-linux-android" }
+        "armeabi-v7a" { return "arm-linux-androideabi" }
+        "x86_64" { return "x86_64-linux-android" }
+        "x86" { return "i686-linux-android" }
+        default { throw "Unsupported ABI: $AbiName" }
+    }
+}
 
 if (-not $NdkRoot -or -not (Test-Path $NdkRoot)) {
     $SdkNdk = Join-Path $env:LOCALAPPDATA "Android\Sdk\ndk"
@@ -26,8 +36,8 @@ if (-not (Test-Path $Toolchain)) {
     throw "NDK cmake toolchain not found: $Toolchain"
 }
 
-# Embed model
-$ModelSrc = Join-Path $Root "model\stream_state_internal.tflite"
+# Embed MFCC-input streaming model (no Flex ops)
+$ModelSrc = Join-Path $Root "model_mfcc\stream_state_internal.tflite"
 $ModelDst = Join-Path $Root "src\model_data.cc"
 if (-not (Test-Path $ModelSrc)) {
     throw "Missing model: $ModelSrc"
@@ -62,23 +72,43 @@ if ($LASTEXITCODE -ne 0) { throw "cmake --build failed" }
 cmake --install $BuildDir
 if ($LASTEXITCODE -ne 0) { throw "cmake --install failed" }
 
+# Refresh runtime deps under dist (no stale Flex libs)
+$RuntimeLibDir = Join-Path $DistDir "runtime"
+if (Test-Path $RuntimeLibDir) {
+    Remove-Item $RuntimeLibDir -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $RuntimeLibDir | Out-Null
+
+$RuntimeLibs = @()
+if (Test-Path (Join-Path $TfliteLibDir "libtensorflowlite_jni.so")) {
+    Copy-Item (Join-Path $TfliteLibDir "libtensorflowlite_jni.so") $RuntimeLibDir -Force
+    $RuntimeLibs += "libtensorflowlite_jni.so"
+} elseif (Test-Path (Join-Path $TfliteLibDir "libtensorflowlite.so")) {
+    Copy-Item (Join-Path $TfliteLibDir "libtensorflowlite.so") $RuntimeLibDir -Force
+    $RuntimeLibs += "libtensorflowlite.so"
+}
+
+$NdkTriple = Get-NdkTriple $Abi
+$CppShared = Join-Path $NdkRoot "toolchains\llvm\prebuilt\windows-x86_64\sysroot\usr\lib\$NdkTriple\libc++_shared.so"
+if (-not (Test-Path $CppShared)) {
+    throw "Missing libc++_shared.so for $Abi at $CppShared"
+}
+Copy-Item $CppShared $RuntimeLibDir -Force
+$RuntimeLibs += "libc++_shared.so"
+
+# Optional metadata for integrators
+$LabelsSrc = Join-Path $Root "model_mfcc\labels.txt"
+if (Test-Path $LabelsSrc) {
+    Copy-Item $LabelsSrc (Join-Path $DistDir "labels.txt") -Force
+}
+
 Write-Host ""
 Write-Host "=== Build OK ==="
 Write-Host "  $($DistDir)\lib\libhey_siri_kws.so"
 Write-Host "  $($DistDir)\include\hey_siri_kws.h"
 Write-Host ""
-$RuntimeLibDir = Join-Path $Root "dist\$Abi\runtime"
-New-Item -ItemType Directory -Force -Path $RuntimeLibDir | Out-Null
-Copy-Item "$TfliteLibDir\libtensorflowlite_jni.so" $RuntimeLibDir -Force -ErrorAction SilentlyContinue
-Copy-Item "$TfliteLibDir\libtensorflowlite.so" $RuntimeLibDir -Force -ErrorAction SilentlyContinue
-Copy-Item "$TfliteLibDir\libtensorflowlite_flex_jni.so" $RuntimeLibDir -Force -ErrorAction SilentlyContinue
-$CppShared = Join-Path $NdkRoot "toolchains\llvm\prebuilt\windows-x86_64\sysroot\usr\lib\$Abi\libc++_shared.so"
-if (Test-Path $CppShared) {
-    Copy-Item $CppShared $RuntimeLibDir -Force
-}
-
-Write-Host "Runtime deps (ship with your APK):"
+Write-Host "Runtime deps (ship with your APK jniLibs/$Abi/):"
 Write-Host "  $($RuntimeLibDir)\"
-Write-Host "    libtensorflowlite_jni.so"
-Write-Host "    libtensorflowlite_flex_jni.so"
-Write-Host "    libc++_shared.so"
+foreach ($name in $RuntimeLibs) {
+    Write-Host "    $name"
+}

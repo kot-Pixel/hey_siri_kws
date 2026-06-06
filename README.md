@@ -55,11 +55,10 @@ kws_destroy(engine);
 `libhey_siri_kws.so` 还需随 APK 打包（在 `dist/<abi>/runtime/` 或 `third_party/tflite/lib/<abi>/`）：
 
 - `libtensorflowlite_jni.so`
-- `libtensorflowlite_flex_jni.so`
 - `libc++_shared.so`
 
-纯 C/C++ 接入，无需 Java 代码；库名中的 `_jni` 来自上游预编译包命名。
+纯 C/C++ 接入，无需 Java 代码；库名中的 `_jni` 来自上游预编译包命名。MFCC 在库内计算，模型为纯 TFLite（无需 Flex）。
 
 ## 更新模型
 
-替换 `model/stream_state_internal.tflite` 后重新执行 `.\scripts\build.ps1`。
+替换 `model_mfcc/stream_state_internal.tflite` 后重新执行 `.\scripts\build.ps1`。

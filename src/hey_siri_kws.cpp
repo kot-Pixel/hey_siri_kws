@@ -3,7 +3,7 @@
 #include <cstring>
 #include <memory>
 
-#include "flex_delegate_loader.h"
+#include "mfcc_extractor.h"
 #include "tensorflow/lite/c/c_api.h"
 
 extern const unsigned char g_hey_siri_model_data[];
@@ -11,16 +11,34 @@ extern const size_t g_hey_siri_model_data_len;
 
 namespace {
 
-constexpr int kFrameSamples = 320;
+constexpr int kFrameSamples = KWS_FRAME_SAMPLES;
 constexpr int kNumLabels = 3;
+constexpr int kMfccFeatures = KWS_MFCC_FEATURES;
+
+kws_mfcc::MfccConfig DefaultMfccConfig() {
+  kws_mfcc::MfccConfig config;
+  config.sample_rate = 16000;
+  config.window_size_samples = 320;
+  config.window_stride_samples = 320;
+  config.mel_num_bins = 40;
+  config.dct_num_features = 20;
+  config.mel_lower_edge_hertz = 20.0f;
+  config.mel_upper_edge_hertz = 7600.0f;
+  config.magnitude_squared = false;
+  return config;
+}
 
 struct KwsEngineImpl {
-  std::unique_ptr<TfLiteDelegate, decltype(&flex_delegate_destroy)> flex_delegate{
-      nullptr, flex_delegate_destroy};
   TfLiteModel* model = nullptr;
   TfLiteInterpreter* interpreter = nullptr;
+  kws_mfcc::MfccExtractor mfcc{DefaultMfccConfig()};
   float last_logits[kNumLabels] = {0.f, 0.f, 0.f};
+  float last_mfcc[kMfccFeatures] = {};
 };
+
+bool ComputeMfcc(KwsEngineImpl* engine, const float* pcm_320, float* mfcc_out) {
+  return engine->mfcc.ComputeFrame(pcm_320, mfcc_out);
+}
 
 bool InitInterpreter(KwsEngineImpl* engine) {
   engine->model = TfLiteModelCreate(g_hey_siri_model_data, g_hey_siri_model_data_len);
@@ -28,15 +46,7 @@ bool InitInterpreter(KwsEngineImpl* engine) {
     return false;
   }
 
-  flex_delegate_init();
-  TfLiteDelegate* flex = flex_delegate_create();
-  if (flex == nullptr) {
-    return false;
-  }
-  engine->flex_delegate.reset(flex);
-
   TfLiteInterpreterOptions* options = TfLiteInterpreterOptionsCreate();
-  TfLiteInterpreterOptionsAddDelegate(options, engine->flex_delegate.get());
   engine->interpreter = TfLiteInterpreterCreate(engine->model, options);
   TfLiteInterpreterOptionsDelete(options);
   if (engine->interpreter == nullptr) {
@@ -47,10 +57,15 @@ bool InitInterpreter(KwsEngineImpl* engine) {
     return false;
   }
 
+  const TfLiteTensor* input = TfLiteInterpreterGetInputTensor(engine->interpreter, 0);
+  if (input == nullptr || TfLiteTensorByteSize(input) != kMfccFeatures * sizeof(float)) {
+    return false;
+  }
+
   return true;
 }
 
-bool FeedFrame(KwsEngineImpl* engine, const float* pcm_320) {
+bool FeedFrame(KwsEngineImpl* engine, const float* mfcc_20) {
   TfLiteTensor* input = TfLiteInterpreterGetInputTensor(engine->interpreter, 0);
   if (input == nullptr) {
     return false;
@@ -61,7 +76,7 @@ bool FeedFrame(KwsEngineImpl* engine, const float* pcm_320) {
     return false;
   }
 
-  std::memcpy(input_data, pcm_320, kFrameSamples * sizeof(float));
+  std::memcpy(input_data, mfcc_20, kMfccFeatures * sizeof(float));
   if (TfLiteInterpreterInvoke(engine->interpreter) != kTfLiteOk) {
     return false;
   }
@@ -86,7 +101,7 @@ extern "C" {
 
 KwsEngine* kws_create(void) {
   auto* engine = new (std::nothrow) KwsEngineImpl();
-  if (engine == nullptr || !InitInterpreter(engine)) {
+  if (engine == nullptr || !engine->mfcc.Initialize() || !InitInterpreter(engine)) {
     delete engine;
     return nullptr;
   }
@@ -107,11 +122,53 @@ void kws_destroy(KwsEngine* engine) {
   delete impl;
 }
 
+int kws_compute_mfcc_f32(KwsEngine* engine, const float* pcm_320, float mfcc_20[kMfccFeatures]) {
+  if (engine == nullptr || pcm_320 == nullptr || mfcc_20 == nullptr) {
+    return -1;
+  }
+  auto* impl = ToImpl(engine);
+  if (!ComputeMfcc(impl, pcm_320, mfcc_20)) {
+    return -1;
+  }
+  std::memcpy(impl->last_mfcc, mfcc_20, kMfccFeatures * sizeof(float));
+  return 0;
+}
+
+int kws_compute_mfcc_i16(KwsEngine* engine, const int16_t* pcm_320, float mfcc_20[kMfccFeatures]) {
+  if (engine == nullptr || pcm_320 == nullptr || mfcc_20 == nullptr) {
+    return -1;
+  }
+  float pcm_f32[kFrameSamples];
+  for (int i = 0; i < kFrameSamples; ++i) {
+    pcm_f32[i] = static_cast<float>(pcm_320[i]) / 32768.0f;
+  }
+  return kws_compute_mfcc_f32(engine, pcm_f32, mfcc_20);
+}
+
+int kws_get_last_mfcc(KwsEngine* engine, float mfcc_20[kMfccFeatures]) {
+  if (engine == nullptr || mfcc_20 == nullptr) {
+    return -1;
+  }
+  std::memcpy(mfcc_20, ToImpl(engine)->last_mfcc, kMfccFeatures * sizeof(float));
+  return 0;
+}
+
+void kws_reset_mfcc(KwsEngine* engine) {
+  if (engine == nullptr) {
+    return;
+  }
+  ToImpl(engine)->mfcc.Reset();
+}
+
 int kws_feed_pcm_f32(KwsEngine* engine, const float* pcm_320) {
   if (engine == nullptr || pcm_320 == nullptr) {
     return -1;
   }
-  return FeedFrame(ToImpl(engine), pcm_320) ? 0 : -1;
+  auto* impl = ToImpl(engine);
+  if (!ComputeMfcc(impl, pcm_320, impl->last_mfcc)) {
+    return -1;
+  }
+  return FeedFrame(impl, impl->last_mfcc) ? 0 : -1;
 }
 
 int kws_feed_pcm_i16(KwsEngine* engine, const int16_t* pcm_320) {
@@ -122,7 +179,7 @@ int kws_feed_pcm_i16(KwsEngine* engine, const int16_t* pcm_320) {
   for (int i = 0; i < kFrameSamples; ++i) {
     pcm_f32[i] = static_cast<float>(pcm_320[i]) / 32768.0f;
   }
-  return FeedFrame(ToImpl(engine), pcm_f32) ? 0 : -1;
+  return kws_feed_pcm_f32(engine, pcm_f32);
 }
 
 int kws_get_logits(KwsEngine* engine, float out_logits[3]) {
