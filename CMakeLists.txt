@@ -10,11 +10,7 @@ add_library(hey_siri_kws SHARED
     src/hey_siri_kws.cpp
     src/model_data.cc
     src/mfcc_extractor.cpp
-    src/mfcc/spectrogram.cc
-    src/mfcc/mfcc.cc
-    src/mfcc/mfcc_mel_filterbank.cc
-    src/mfcc/mfcc_dct.cc
-    third_party/fft2d/fftsg.c
+    src/mfcc/rfft.cc
 )
 
 target_include_directories(hey_siri_kws
@@ -23,7 +19,6 @@ target_include_directories(hey_siri_kws
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fft2d
         ${TFLITE_ROOT}/include
 )
 

@@ -36,8 +36,14 @@ if (-not (Test-Path $Toolchain)) {
     throw "NDK cmake toolchain not found: $Toolchain"
 }
 
-# Embed MFCC-input streaming model (no Flex ops)
-$ModelSrc = Join-Path $Root "model_mfcc\stream_state_internal.tflite"
+# Embed MFCC-input streaming model (prefer INT8 if present)
+$ModelInt8 = Join-Path $Root "model_mfcc\stream_state_internal_int8.tflite"
+$ModelFloat = Join-Path $Root "model_mfcc\stream_state_internal.tflite"
+if (Test-Path $ModelInt8) {
+    $ModelSrc = $ModelInt8
+} else {
+    $ModelSrc = $ModelFloat
+}
 $ModelDst = Join-Path $Root "src\model_data.cc"
 if (-not (Test-Path $ModelSrc)) {
     throw "Missing model: $ModelSrc"

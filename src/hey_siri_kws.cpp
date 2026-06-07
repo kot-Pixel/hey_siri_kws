@@ -1,5 +1,7 @@
 #include "hey_siri_kws.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <memory>
 
@@ -58,11 +60,19 @@ bool InitInterpreter(KwsEngineImpl* engine) {
   }
 
   const TfLiteTensor* input = TfLiteInterpreterGetInputTensor(engine->interpreter, 0);
-  if (input == nullptr || TfLiteTensorByteSize(input) != kMfccFeatures * sizeof(float)) {
+  if (input == nullptr) {
     return false;
   }
-
-  return true;
+  const TfLiteType input_type = TfLiteTensorType(input);
+  if (input_type == kTfLiteFloat32 &&
+      TfLiteTensorByteSize(input) == kMfccFeatures * sizeof(float)) {
+    return true;
+  }
+  if ((input_type == kTfLiteInt8 || input_type == kTfLiteUInt8) &&
+      TfLiteTensorByteSize(input) == kMfccFeatures) {
+    return true;
+  }
+  return false;
 }
 
 bool FeedFrame(KwsEngineImpl* engine, const float* mfcc_20) {
@@ -71,12 +81,31 @@ bool FeedFrame(KwsEngineImpl* engine, const float* mfcc_20) {
     return false;
   }
 
-  float* input_data = reinterpret_cast<float*>(TfLiteTensorData(input));
-  if (input_data == nullptr) {
+  const TfLiteType input_type = TfLiteTensorType(input);
+  if (input_type == kTfLiteFloat32) {
+    float* input_data = reinterpret_cast<float*>(TfLiteTensorData(input));
+    if (input_data == nullptr) {
+      return false;
+    }
+    std::memcpy(input_data, mfcc_20, kMfccFeatures * sizeof(float));
+  } else if (input_type == kTfLiteInt8 || input_type == kTfLiteUInt8) {
+    const TfLiteQuantizationParams qparams = TfLiteTensorQuantizationParams(input);
+    if (qparams.scale == 0.0f) {
+      return false;
+    }
+    for (int i = 0; i < kMfccFeatures; ++i) {
+      int q = static_cast<int>(std::lround(mfcc_20[i] / qparams.scale) + qparams.zero_point);
+      if (input_type == kTfLiteInt8) {
+        q = std::max(-128, std::min(127, q));
+        reinterpret_cast<int8_t*>(TfLiteTensorData(input))[i] = static_cast<int8_t>(q);
+      } else {
+        q = std::max(0, std::min(255, q));
+        reinterpret_cast<uint8_t*>(TfLiteTensorData(input))[i] = static_cast<uint8_t>(q);
+      }
+    }
+  } else {
     return false;
   }
-
-  std::memcpy(input_data, mfcc_20, kMfccFeatures * sizeof(float));
   if (TfLiteInterpreterInvoke(engine->interpreter) != kTfLiteOk) {
     return false;
   }
