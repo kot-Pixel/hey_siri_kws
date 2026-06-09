@@ -7,7 +7,7 @@ conda activate kws39
 export PYTHONPATH=/home/wdf/kws_work/google-research
 cd /home/wdf/kws_work/google-research
 
-TRAIN_DIR=/home/wdf/kws_work/models/hey_siri_mfcc_int8_run
+TRAIN_DIR=/home/wdf/kws_work/models/hey_siri_mfcc_int8_hard_run
 DATA_DIR=/home/wdf/kws_work/data/content/drive/MyDrive/kws_data/kws_train_data
 
 rm -rf "$TRAIN_DIR"
@@ -31,13 +31,13 @@ CUDA_VISIBLE_DEVICES=-1 python -m kws_streaming.train.model_train_eval \
   --background_frequency 0.8 \
   --background_volume 0.1 \
   --time_shift_ms 100 \
-  --silence_percentage 10 \
-  --unknown_percentage 60 \
+  --silence_percentage 15 \
+  --unknown_percentage 70 \
   --split_data 1 \
   --train 1 \
-  --how_many_training_steps 10000,10000,10000 \
-  --eval_step_interval 500 \
-  --save_step_interval 1000 \
+  --how_many_training_steps 30000,30000,30000 \
+  --eval_step_interval 1000 \
+  --save_step_interval 2000 \
   --learning_rate 0.001,0.0005,0.0001 \
   --alsologtostderr \
   svdf \
