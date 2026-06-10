@@ -23,7 +23,10 @@ dist/arm64-v8a/
 ```powershell
 cd E:\WorkSpace\Person\hey_siri_kws
 
-# 首次：下载 TFLite 依赖
+# 可选：WSL 内编译静态 TFLite（减少 APK 依赖，只需 libhey_siri_kws.so）
+# wsl -d Ubuntu-22.04 -- bash /mnt/e/WorkSpace/Person/hey_siri_kws/scripts/build_tflite_static.sh
+
+# 首次（动态 TFLite 回退）：下载 TFLite 依赖
 .\scripts\prepare_deps.ps1
 
 # 编译 arm64
@@ -32,6 +35,8 @@ cd E:\WorkSpace\Person\hey_siri_kws
 # 编译 armeabi-v7a
 .\scripts\build.ps1 -Abi armeabi-v7a
 ```
+
+若已执行 `build_tflite_static.sh`，`build.ps1` 会自动静态链 TFLite（`c++_static`），**无需**再打包 `libtensorflowlite_jni.so` / `libc++_shared.so`。
 
 ## C API
 
@@ -52,7 +57,9 @@ kws_destroy(engine);
 
 ## 运行时 native 依赖
 
-`libhey_siri_kws.so` 还需随 APK 打包（在 `dist/<abi>/runtime/` 或 `third_party/tflite/lib/<abi>/`）：
+**静态 TFLite（推荐，WSL 编译后）：** 只需 `libhey_siri_kws.so`。
+
+**动态 TFLite（默认回退）：** `libhey_siri_kws.so` 还需随 APK 打包（在 `dist/<abi>/runtime/` 或 `third_party/tflite/lib/<abi>/`）：
 
 - `libtensorflowlite_jni.so`
 - `libc++_shared.so`
