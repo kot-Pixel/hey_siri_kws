@@ -63,7 +63,7 @@ CUDA_VISIBLE_DEVICES=-1 python -m kws_streaming.train.model_train_eval \
   --blocks_n '2, 2, 4, 4' \
   --filters '16, 24, 32, 40' \
   --dilations '(1,1),(2,1),(4,1),(8,1)' \
-  --strides '(1,1),(1,2),(1,2),(1,1)' \
+  --strides '(1,1),(1,2),(1,1),(1,1)' \
   --dropouts '0.1, 0.1, 0.1, 0.1' \
   --pools '1, 1, 1, 1' \
   --max_pool 0
