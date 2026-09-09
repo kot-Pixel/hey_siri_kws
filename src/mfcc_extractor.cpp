@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <vector>
 
 #include "mfcc/rfft.h"
@@ -162,9 +163,13 @@ bool MfccExtractor::ComputeFrame(const float* pcm_frame, float* mfcc_out) {
     return false;
   }
 
-  std::fill(impl_->windowed.begin(), impl_->windowed.end(), 0.0f);
   for (int i = 0; i < config_.window_size_samples; ++i) {
     impl_->windowed[i] = pcm_frame[i] * impl_->hann_window[i];
+  }
+  const int pad = impl_->fft_length - config_.window_size_samples;
+  if (pad > 0) {
+    std::memset(impl_->windowed.data() + config_.window_size_samples, 0,
+                static_cast<size_t>(pad) * sizeof(float));
   }
 
   impl_->fft.Forward(impl_->windowed.data(), impl_->fft_out.data());

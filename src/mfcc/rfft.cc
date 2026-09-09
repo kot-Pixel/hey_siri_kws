@@ -1,93 +1,63 @@
 #include "mfcc/rfft.h"
 
-#include <cmath>
+#include <cstring>
+
+#include "pffft.h"
 
 namespace kws_mfcc {
 namespace internal {
 
-namespace {
-
-int Log2(int n) {
-  int log = 0;
-  while ((1 << log) < n) {
-    ++log;
-  }
-  return log;
+RealFft::~RealFft() {
+  if (work_) pffft_aligned_free(work_);
+  if (aligned_out_) pffft_aligned_free(aligned_out_);
+  if (aligned_in_) pffft_aligned_free(aligned_in_);
+  if (setup_) pffft_destroy_setup(setup_);
 }
-
-void BitReversePermute(std::vector<float>* real, std::vector<float>* imag, int n) {
-  int j = 0;
-  for (int i = 1; i < n; ++i) {
-    int bit = n >> 1;
-    for (; j & bit; bit >>= 1) {
-      j ^= bit;
-    }
-    j ^= bit;
-    if (i < j) {
-      std::swap((*real)[i], (*real)[j]);
-      std::swap((*imag)[i], (*imag)[j]);
-    }
-  }
-}
-
-}  // namespace
 
 bool RealFft::Initialize(int n) {
-  if (n < 2 || (n & (n - 1)) != 0) {
+  if (n < 32 || (n & (n - 1)) != 0) {
+    return false;
+  }
+  setup_ = pffft_new_setup(n, PFFFT_REAL);
+  if (setup_ == nullptr) {
     return false;
   }
   n_ = n;
-  log2_n_ = Log2(n);
-  const int half = n / 2;
-  twiddle_cos_.resize(half);
-  twiddle_sin_.resize(half);
-  const float pi = std::acos(-1.0f);
-  for (int i = 0; i < half; ++i) {
-    const float angle = -2.0f * pi * static_cast<float>(i) / static_cast<float>(n);
-    twiddle_cos_[i] = std::cos(angle);
-    twiddle_sin_[i] = std::sin(angle);
+  aligned_in_ = static_cast<float*>(pffft_aligned_malloc(
+      static_cast<size_t>(n) * sizeof(float)));
+  aligned_out_ = static_cast<float*>(pffft_aligned_malloc(
+      static_cast<size_t>(n) * sizeof(float)));
+  work_ = static_cast<float*>(pffft_aligned_malloc(
+      static_cast<size_t>(n) * sizeof(float)));
+  if (!aligned_in_ || !aligned_out_ || !work_) {
+    return false;
   }
-  work_real_.assign(n, 0.0f);
-  work_imag_.assign(n, 0.0f);
   return true;
 }
 
 void RealFft::Forward(const float* input, float* output) {
-  work_real_.assign(n_, 0.0f);
-  work_imag_.assign(n_, 0.0f);
-  for (int i = 0; i < n_; ++i) {
-    work_real_[i] = input[i];
-  }
+  std::memcpy(aligned_in_, input, static_cast<size_t>(n_) * sizeof(float));
 
-  BitReversePermute(&work_real_, &work_imag_, n_);
+  pffft_transform_ordered(setup_, aligned_in_, aligned_out_, work_,
+                          PFFFT_FORWARD);
 
-  for (int len = 2; len <= n_; len <<= 1) {
-    const int half_len = len / 2;
-    const int step = n_ / len;
-    for (int i = 0; i < n_; i += len) {
-      for (int j = 0; j < half_len; ++j) {
-        const int tw_idx = j * step;
-        const float cos_v = twiddle_cos_[tw_idx];
-        const float sin_v = twiddle_sin_[tw_idx];
-        const int even = i + j;
-        const int odd = i + j + half_len;
-        const float t_real = work_real_[odd] * cos_v - work_imag_[odd] * sin_v;
-        const float t_imag = work_real_[odd] * sin_v + work_imag_[odd] * cos_v;
-        work_real_[odd] = work_real_[even] - t_real;
-        work_imag_[odd] = work_imag_[even] - t_imag;
-        work_real_[even] += t_real;
-        work_imag_[even] += t_imag;
-      }
-    }
-  }
+  // pffft ordered real output (length N):
+  //   [0] = DC,  [1] = Nyquist,
+  //   [2k] = Re(k),  [2k+1] = Im(k)  for k = 1..N/2-1
+  //
+  // Convert to TF rdft unpack layout (length N+2):
+  //   [0] = DC_re,  [1] = 0,
+  //   [2k] = Re(k), [2k+1] = Im(k)   for k = 1..N/2-1,
+  //   [N] = Nyquist_re,  [N+1] = 0
+  const int half = n_ / 2;
 
-  const int out_bins = n_ / 2 + 1;
-  for (int k = 0; k < out_bins; ++k) {
-    output[2 * k] = work_real_[k];
-    output[2 * k + 1] = work_imag_[k];
-  }
+  output[0] = aligned_out_[0];
   output[1] = 0.0f;
-  output[n_] = work_real_[n_ / 2];
+
+  std::memcpy(output + 2, aligned_out_ + 2,
+              static_cast<size_t>(half - 1) * 2 * sizeof(float));
+
+  output[n_] = aligned_out_[1];
   output[n_ + 1] = 0.0f;
 }
 

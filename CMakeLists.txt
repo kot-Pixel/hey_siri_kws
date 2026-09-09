@@ -14,6 +14,7 @@ add_library(hey_siri_kws SHARED
     src/model_data.cc
     src/mfcc_extractor.cpp
     src/mfcc/rfft.cc
+    third_party/pffft/pffft.c
 )
 
 find_library(LOG_LIB log)
@@ -47,6 +48,7 @@ if(USE_TFLITE_STATIC AND EXISTS "${TFLITE_STATIC_MARKER}")
       $<INSTALL_INTERFACE:include>
     PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/src
+      ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pffft
       ${TFLITE_STATIC_ROOT}/include
   )
 
@@ -67,6 +69,7 @@ else()
       $<INSTALL_INTERFACE:include>
     PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/src
+      ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pffft
       ${TFLITE_ROOT}/include
   )
 
