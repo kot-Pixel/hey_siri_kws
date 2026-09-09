@@ -12,7 +12,7 @@ import tensorflow as tf
 import tensorflow.compat.v1 as tf1
 
 from kws_streaming.layers import modes
-from kws_streaming.models import model_flags, svdf, utils
+from kws_streaming.models import model_flags, utils
 
 tf.compat.v1.enable_eager_execution()
 
@@ -31,19 +31,30 @@ def load_flags(model_dir):
   return model_flags.update_flags(flags)
 
 
+def _import_model_module(model_name):
+  """Dynamically import the model builder from kws_streaming.models."""
+  import importlib
+  module = importlib.import_module(f'kws_streaming.models.{model_name}')
+  return module
+
+
 def load_model(flags):
-  model = svdf.model(flags)
+  model_name = flags.model_name if hasattr(flags, 'model_name') else 'svdf'
+  log(f'Loading model type: {model_name}')
+  mod = _import_model_module(model_name)
+  model = mod.model(flags)
   model.load_weights(os.path.join(flags.train_dir, 'best_weights')).expect_partial()
   return model
 
 
-def make_representative_dataset(num_samples=200):
+def make_representative_dataset(flags, num_samples=200):
   rng = np.random.default_rng(42)
+  input_shape = modes.get_input_data_shape(flags, modes.Modes.TRAINING)
 
   def generator():
     for _ in range(num_samples):
-      # MFCC feature calibration samples in streaming shape [1, 1, 20].
-      features = rng.normal(loc=-5.0, scale=3.0, size=(1, 1, 20)).astype(np.float32)
+      features = rng.normal(loc=-5.0, scale=3.0,
+                            size=(1,) + tuple(input_shape)).astype(np.float32)
       yield [features]
 
   return generator
@@ -76,7 +87,7 @@ def main():
       optimizations=[tf.lite.Optimize.DEFAULT],
       inference_type=tf1.lite.constants.QUANTIZED_UINT8,
       experimental_new_quantizer=False,
-      representative_dataset=make_representative_dataset(args.rep_samples),
+      representative_dataset=make_representative_dataset(flags, args.rep_samples),
       supported_ops_override=[tf.lite.OpsSet.TFLITE_BUILTINS],
       allow_custom_ops=False,
       inference_input_type=tf.float32,
