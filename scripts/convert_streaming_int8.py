@@ -47,9 +47,12 @@ def load_model(flags):
   return model
 
 
-def make_representative_dataset(flags, num_samples=200):
+def make_representative_dataset(flags, mode, num_samples=200):
   rng = np.random.default_rng(42)
-  input_shape = modes.get_input_data_shape(flags, modes.Modes.TRAINING)
+  # Must match the graph being converted: a streaming graph consumes one frame
+  # per invocation, not a whole spectrogram.
+  input_shape = modes.get_input_data_shape(flags, mode)
+  log(f'Representative dataset shape: {(1,) + tuple(input_shape)}')
 
   def generator():
     for _ in range(num_samples):
@@ -74,6 +77,7 @@ def main():
     sys.exit(1)
 
   model = load_model(flags)
+  convert_mode = modes.Modes.STREAM_INTERNAL_STATE_INFERENCE
   saved_dir = os.path.join(flags.train_dir, 'stream_state_internal_int8_saved')
   os.makedirs(saved_dir, exist_ok=True)
 
@@ -82,12 +86,13 @@ def main():
       sess=None,
       model_non_stream=model,
       flags=flags,
-      mode=modes.Modes.STREAM_INTERNAL_STATE_INFERENCE,
+      mode=convert_mode,
       save_model_path=saved_dir,
       optimizations=[tf.lite.Optimize.DEFAULT],
       inference_type=tf1.lite.constants.QUANTIZED_UINT8,
       experimental_new_quantizer=False,
-      representative_dataset=make_representative_dataset(flags, args.rep_samples),
+      representative_dataset=make_representative_dataset(
+          flags, convert_mode, args.rep_samples),
       supported_ops_override=[tf.lite.OpsSet.TFLITE_BUILTINS],
       allow_custom_ops=False,
       inference_input_type=tf.float32,
