@@ -16,6 +16,8 @@ namespace {
 constexpr int kFrameSamples = KWS_FRAME_SAMPLES;
 constexpr int kNumLabels = 3;
 constexpr int kMfccFeatures = KWS_MFCC_FEATURES;
+constexpr int kMfccFrames = KWS_MFCC_FRAMES;
+constexpr int kMfccWindow = kMfccFrames * kMfccFeatures;
 
 kws_mfcc::MfccConfig DefaultMfccConfig() {
   kws_mfcc::MfccConfig config;
@@ -36,6 +38,7 @@ struct KwsEngineImpl {
   kws_mfcc::MfccExtractor mfcc{DefaultMfccConfig()};
   float last_logits[kNumLabels] = {0.f, 0.f, 0.f};
   float last_mfcc[kMfccFeatures] = {};
+  float mfcc_window[kMfccWindow] = {};
 };
 
 bool ComputeMfcc(KwsEngineImpl* engine, const float* pcm_320, float* mfcc_out) {
@@ -65,17 +68,22 @@ bool InitInterpreter(KwsEngineImpl* engine) {
   }
   const TfLiteType input_type = TfLiteTensorType(input);
   if (input_type == kTfLiteFloat32 &&
-      TfLiteTensorByteSize(input) == kMfccFeatures * sizeof(float)) {
+      TfLiteTensorByteSize(input) == kMfccWindow * sizeof(float)) {
     return true;
   }
   if ((input_type == kTfLiteInt8 || input_type == kTfLiteUInt8) &&
-      TfLiteTensorByteSize(input) == kMfccFeatures) {
+      TfLiteTensorByteSize(input) == kMfccWindow) {
     return true;
   }
   return false;
 }
 
 bool FeedFrame(KwsEngineImpl* engine, const float* mfcc_20) {
+  std::memmove(engine->mfcc_window, engine->mfcc_window + kMfccFeatures,
+               (kMfccFrames - 1) * kMfccFeatures * sizeof(float));
+  std::memcpy(engine->mfcc_window + (kMfccFrames - 1) * kMfccFeatures, mfcc_20,
+              kMfccFeatures * sizeof(float));
+
   TfLiteTensor* input = TfLiteInterpreterGetInputTensor(engine->interpreter, 0);
   if (input == nullptr) {
     return false;
@@ -87,14 +95,15 @@ bool FeedFrame(KwsEngineImpl* engine, const float* mfcc_20) {
     if (input_data == nullptr) {
       return false;
     }
-    std::memcpy(input_data, mfcc_20, kMfccFeatures * sizeof(float));
+    std::memcpy(input_data, engine->mfcc_window, kMfccWindow * sizeof(float));
   } else if (input_type == kTfLiteInt8 || input_type == kTfLiteUInt8) {
     const TfLiteQuantizationParams qparams = TfLiteTensorQuantizationParams(input);
     if (qparams.scale == 0.0f) {
       return false;
     }
-    for (int i = 0; i < kMfccFeatures; ++i) {
-      int q = static_cast<int>(std::lround(mfcc_20[i] / qparams.scale) + qparams.zero_point);
+    for (int i = 0; i < kMfccWindow; ++i) {
+      int q = static_cast<int>(std::lround(engine->mfcc_window[i] / qparams.scale) +
+                               qparams.zero_point);
       if (input_type == kTfLiteInt8) {
         q = std::max(-128, std::min(127, q));
         reinterpret_cast<int8_t*>(TfLiteTensorData(input))[i] = static_cast<int8_t>(q);
@@ -186,7 +195,9 @@ void kws_reset_mfcc(KwsEngine* engine) {
   if (engine == nullptr) {
     return;
   }
-  ToImpl(engine)->mfcc.Reset();
+  auto* impl = ToImpl(engine);
+  impl->mfcc.Reset();
+  std::memset(impl->mfcc_window, 0, sizeof(impl->mfcc_window));
 }
 
 int kws_feed_pcm_f32(KwsEngine* engine, const float* pcm_320) {

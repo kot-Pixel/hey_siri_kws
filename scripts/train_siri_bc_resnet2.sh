@@ -64,7 +64,8 @@ CUDA_VISIBLE_DEVICES=-1 python -m kws_streaming.train.model_train_eval \
 
 python "$PROJECT_ROOT/scripts/convert_streaming_int8.py" \
   --model_dir "$TRAIN_DIR" \
-  --rep_samples 200
+  --data_dir "$DATA_DIR" \
+  --rep_samples 400
 
 echo "INT8 model:"
 ls -lh "$TRAIN_DIR/tflite_stream_state_internal/stream_state_internal_int8.tflite"

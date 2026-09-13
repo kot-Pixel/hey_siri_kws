@@ -17,6 +17,7 @@ enum KwsLabel {
 enum {
   KWS_FRAME_SAMPLES = 320,
   KWS_MFCC_FEATURES = 20,
+  KWS_MFCC_FRAMES = 50,
 };
 
 typedef struct KwsEngine KwsEngine;
