@@ -2,13 +2,18 @@
 # Train hey_siri MFCC model and export INT8 streaming TFLite.
 set -euo pipefail
 
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
 source /home/wdf/miniconda3/etc/profile.d/conda.sh
 conda activate kws39
 export PYTHONPATH=/home/wdf/kws_work/google-research
 cd /home/wdf/kws_work/google-research
 
-TRAIN_DIR=/home/wdf/kws_work/models/hey_siri_mfcc_int8_hard_run
+TRAIN_DIR=/home/wdf/kws_work/models/hey_siri_mfcc_int8_9k_run
 DATA_DIR=/home/wdf/kws_work/data/content/drive/MyDrive/kws_data/kws_train_data
+
+echo "Checking WAV format (PCM s16 mono 16kHz) ..."
+python "$PROJECT_ROOT/scripts/fix_wav_dataset.py" --data-dir "$DATA_DIR"
 
 rm -rf "$TRAIN_DIR"
 
@@ -49,7 +54,7 @@ CUDA_VISIBLE_DEVICES=-1 python -m kws_streaming.train.model_train_eval \
   --svdf_pad 1 \
   --dropout1 0.0
 
-python /home/wdf/kws_work/convert_streaming_int8.py \
+python "$PROJECT_ROOT/scripts/convert_streaming_int8.py" \
   --model_dir "$TRAIN_DIR" \
   --rep_samples 200
 
