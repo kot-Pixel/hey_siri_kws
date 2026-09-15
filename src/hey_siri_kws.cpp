@@ -18,6 +18,10 @@ constexpr int kNumLabels = 3;
 constexpr int kMfccFeatures = KWS_MFCC_FEATURES;
 constexpr int kMfccFrames = KWS_MFCC_FRAMES;
 constexpr int kMfccWindow = kMfccFrames * kMfccFeatures;
+constexpr int kInferStride = KWS_INFER_STRIDE;
+constexpr int kWakeHits = KWS_WAKE_HITS;
+constexpr float kWakeThreshold = KWS_WAKE_THRESHOLD;
+constexpr int kSiriLabel = KWS_LABEL_HEY_SIRI;
 
 kws_mfcc::MfccConfig DefaultMfccConfig() {
   kws_mfcc::MfccConfig config;
@@ -37,8 +41,11 @@ struct KwsEngineImpl {
   TfLiteInterpreter* interpreter = nullptr;
   kws_mfcc::MfccExtractor mfcc{DefaultMfccConfig()};
   float last_logits[kNumLabels] = {0.f, 0.f, 0.f};
+  float last_probs[kNumLabels] = {0.f, 0.f, 0.f};
   float last_mfcc[kMfccFeatures] = {};
   float mfcc_window[kMfccWindow] = {};
+  int frames_until_infer = 0;
+  int wake_hits = 0;
 };
 
 bool ComputeMfcc(KwsEngineImpl* engine, const float* pcm_320, float* mfcc_out) {
@@ -52,6 +59,7 @@ bool InitInterpreter(KwsEngineImpl* engine) {
   }
 
   TfLiteInterpreterOptions* options = TfLiteInterpreterOptionsCreate();
+  TfLiteInterpreterOptionsSetNumThreads(options, 1);
   engine->interpreter = TfLiteInterpreterCreate(engine->model, options);
   TfLiteInterpreterOptionsDelete(options);
   if (engine->interpreter == nullptr) {
@@ -83,6 +91,12 @@ bool FeedFrame(KwsEngineImpl* engine, const float* mfcc_20) {
                (kMfccFrames - 1) * kMfccFeatures * sizeof(float));
   std::memcpy(engine->mfcc_window + (kMfccFrames - 1) * kMfccFeatures, mfcc_20,
               kMfccFeatures * sizeof(float));
+
+  if (engine->frames_until_infer > 0) {
+    engine->frames_until_infer -= 1;
+    return true;
+  }
+  engine->frames_until_infer = kInferStride - 1;
 
   TfLiteTensor* input = TfLiteInterpreterGetInputTensor(engine->interpreter, 0);
   if (input == nullptr) {
@@ -126,6 +140,26 @@ bool FeedFrame(KwsEngineImpl* engine, const float* mfcc_20) {
 
   const float* out = reinterpret_cast<const float*>(TfLiteTensorData(output));
   std::memcpy(engine->last_logits, out, kNumLabels * sizeof(float));
+
+  float max_logit = engine->last_logits[0];
+  for (int i = 1; i < kNumLabels; ++i) {
+    max_logit = std::max(max_logit, engine->last_logits[i]);
+  }
+  float sum = 0.f;
+  for (int i = 0; i < kNumLabels; ++i) {
+    engine->last_probs[i] = std::exp(engine->last_logits[i] - max_logit);
+    sum += engine->last_probs[i];
+  }
+  if (sum > 0.f) {
+    for (int i = 0; i < kNumLabels; ++i) {
+      engine->last_probs[i] /= sum;
+    }
+  }
+  if (engine->last_probs[kSiriLabel] >= kWakeThreshold) {
+    engine->wake_hits += 1;
+  } else {
+    engine->wake_hits = 0;
+  }
   return true;
 }
 
@@ -198,6 +232,9 @@ void kws_reset_mfcc(KwsEngine* engine) {
   auto* impl = ToImpl(engine);
   impl->mfcc.Reset();
   std::memset(impl->mfcc_window, 0, sizeof(impl->mfcc_window));
+  impl->frames_until_infer = 0;
+  impl->wake_hits = 0;
+  std::memset(impl->last_probs, 0, sizeof(impl->last_probs));
 }
 
 int kws_feed_pcm_f32(KwsEngine* engine, const float* pcm_320) {
@@ -234,14 +271,16 @@ int kws_get_top_label(KwsEngine* engine) {
   if (engine == nullptr) {
     return -1;
   }
-  const float* logits = ToImpl(engine)->last_logits;
-  int best = 0;
-  float best_score = logits[0];
-  for (int i = 1; i < kNumLabels; ++i) {
-    if (logits[i] > best_score) {
-      best_score = logits[i];
-      best = i;
-    }
+  auto* impl = ToImpl(engine);
+  if (impl->wake_hits >= kWakeHits) {
+    return kSiriLabel;
+  }
+  const float* logits = impl->last_logits;
+  int best = KWS_LABEL_SILENCE;
+  float best_score = logits[KWS_LABEL_SILENCE];
+  if (logits[KWS_LABEL_UNKNOWN] > best_score) {
+    best = KWS_LABEL_UNKNOWN;
+    best_score = logits[KWS_LABEL_UNKNOWN];
   }
   return best;
 }
@@ -251,6 +290,20 @@ float kws_get_label_score(KwsEngine* engine, int label) {
     return 0.f;
   }
   return ToImpl(engine)->last_logits[label];
+}
+
+float kws_get_label_prob(KwsEngine* engine, int label) {
+  if (engine == nullptr || label < 0 || label >= kNumLabels) {
+    return 0.f;
+  }
+  return ToImpl(engine)->last_probs[label];
+}
+
+int kws_is_wake(KwsEngine* engine) {
+  if (engine == nullptr) {
+    return 0;
+  }
+  return ToImpl(engine)->wake_hits >= kWakeHits ? 1 : 0;
 }
 
 }  // extern "C"

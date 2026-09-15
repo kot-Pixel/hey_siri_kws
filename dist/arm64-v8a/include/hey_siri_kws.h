@@ -18,7 +18,15 @@ enum {
   KWS_FRAME_SAMPLES = 320,
   KWS_MFCC_FEATURES = 20,
   KWS_MFCC_FRAMES = 50,
+  // Clip model is ~7.3M ops. Run it every N 20ms frames (80ms) instead of
+  // every frame; the 1s MFCC window still shifts every 20ms.
+  KWS_INFER_STRIDE = 4,
+  // Consecutive inferences above KWS_WAKE_THRESHOLD before top_label is siri.
+  KWS_WAKE_HITS = 2,
 };
+
+// Softmax(siri) must stay at or above this for KWS_WAKE_HITS inferences.
+#define KWS_WAKE_THRESHOLD 0.90f
 
 typedef struct KwsEngine KwsEngine;
 
@@ -37,6 +45,8 @@ void kws_reset_mfcc(KwsEngine* engine);
 int kws_get_logits(KwsEngine* engine, float out_logits[3]);
 int kws_get_top_label(KwsEngine* engine);
 float kws_get_label_score(KwsEngine* engine, int label);
+float kws_get_label_prob(KwsEngine* engine, int label);
+int kws_is_wake(KwsEngine* engine);
 
 #ifdef __cplusplus
 }

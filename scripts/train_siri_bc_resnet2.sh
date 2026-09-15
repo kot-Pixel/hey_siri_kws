@@ -11,8 +11,15 @@ conda activate kws39
 export PYTHONPATH=/home/wdf/kws_work/google-research
 cd /home/wdf/kws_work/google-research
 
-TRAIN_DIR=/home/wdf/kws_work/models/siri_bc_resnet2_run
-DATA_DIR=/mnt/e/kwsDataSet/produce
+TRAIN_DIR=/home/wdf/kws_work/models/siri_bc_resnet2_siri4500
+SRC_DATA=/mnt/e/kwsDataSet/produce
+DATA_DIR=/home/wdf/kws_work/data/siri_hardneg
+
+# 混淆词全部进入 unknown；剩余 0.7*|siri| 名额从其它关键字目录抽。
+python "$PROJECT_ROOT/scripts/make_unknown_quota_datadir.py" \
+  --src "$SRC_DATA" \
+  --dst "$DATA_DIR" \
+  --unknown-percentage 70
 
 rm -rf "$TRAIN_DIR"
 
@@ -64,7 +71,8 @@ CUDA_VISIBLE_DEVICES=-1 python -m kws_streaming.train.model_train_eval \
 
 python "$PROJECT_ROOT/scripts/convert_streaming_int8.py" \
   --model_dir "$TRAIN_DIR" \
-  --data_dir "$DATA_DIR" \
+  --clip \
+  --data_dir "$SRC_DATA" \
   --rep_samples 400
 
 echo "INT8 model:"

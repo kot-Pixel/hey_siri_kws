@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-"""Evaluate streaming INT8 KWS model on a folder-per-label WAV dataset."""
+"""Evaluate KWS model on a folder-per-label WAV dataset.
+
+wake mode matches C++ realtime logic in src/hey_siri_kws.cpp:
+  50-frame MFCC sliding window, invoke every KWS_INFER_STRIDE frames,
+  softmax(siri) >= KWS_WAKE_THRESHOLD for KWS_WAKE_HITS consecutive infers.
+"""
 
 import argparse
+import hashlib
 import os
+import re
 import sys
 import wave
 
@@ -11,15 +18,30 @@ import tensorflow as tf
 from tensorflow.python.ops import gen_audio_ops as audio_ops
 
 
-LABELS = ("_silence_", "_unknown_", "siri")
 SIRI_INDEX = 2
+MAX_NUM_WAVS_PER_CLASS = 2**27 - 1
 
 
 def log(msg):
     print(msg, flush=True)
 
 
-def read_wav_pcm16(path, sample_rate=16000, desired_samples=16000):
+def which_set(filename, validation_percentage=10, testing_percentage=10):
+    base_name = os.path.basename(filename)
+    hash_name = re.sub(r"_nohash_.*$", "", base_name)
+    hashed = hashlib.sha1(hash_name.encode("utf-8")).hexdigest()
+    percentage_hash = (
+        (int(hashed, 16) % (MAX_NUM_WAVS_PER_CLASS + 1))
+        * (100.0 / MAX_NUM_WAVS_PER_CLASS)
+    )
+    if percentage_hash < validation_percentage:
+        return "validation"
+    if percentage_hash < testing_percentage + validation_percentage:
+        return "testing"
+    return "training"
+
+
+def read_wav_pcm16(path, sample_rate=16000, min_samples=0, truncate=False):
     with wave.open(path, "rb") as wav:
         if wav.getnchannels() != 1:
             raise ValueError("not mono")
@@ -30,10 +52,10 @@ def read_wav_pcm16(path, sample_rate=16000, desired_samples=16000):
         n = wav.getnframes()
         raw = wav.readframes(n)
     pcm = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
-    if pcm.size < desired_samples:
-        pcm = np.pad(pcm, (0, desired_samples - pcm.size))
-    elif pcm.size > desired_samples:
-        pcm = pcm[:desired_samples]
+    if min_samples > 0 and pcm.size < min_samples:
+        pcm = np.pad(pcm, (0, min_samples - pcm.size))
+    elif truncate and min_samples > 0 and pcm.size > min_samples:
+        pcm = pcm[:min_samples]
     return pcm
 
 
@@ -55,7 +77,7 @@ def pcm_to_mfcc(pcm, sample_rate, window_size, window_stride, mel_lo, mel_hi, me
     return mfcc.numpy()[0]
 
 
-def list_dataset(data_dir, keyword, max_per_label, max_keyword=0):
+def list_dataset(data_dir, keyword, max_per_label, max_keyword=0, split="all"):
     labels = []
     for name in sorted(os.listdir(data_dir)):
         path = os.path.join(data_dir, name)
@@ -66,6 +88,8 @@ def list_dataset(data_dir, keyword, max_per_label, max_keyword=0):
             for fn in sorted(os.listdir(path))
             if fn.lower().endswith(".wav")
         ]
+        if split != "all":
+            wavs = [p for p in wavs if which_set(p) == split]
         if not wavs:
             continue
         if name == keyword and max_keyword > 0:
@@ -125,6 +149,40 @@ def run_clip_tflite(interp, input_index, output_index, mfcc, time_steps, feat_di
     return last, float(last[SIRI_INDEX]), prob
 
 
+def run_clip_wake(interp, input_index, output_index, mfcc, time_steps, feat_dim,
+                  infer_stride, wake_threshold, wake_hits):
+    """Slide a 1s clip window like hey_siri_kws.cpp FeedFrame + kws_is_wake."""
+    window = np.zeros((time_steps, feat_dim), dtype=np.float32)
+    frames_until = 0
+    hits = 0
+    woke = False
+    max_prob = 0.0
+    last = np.zeros((3,), dtype=np.float32)
+    n_infer = 0
+    for frame in mfcc:
+        window[:-1] = window[1:]
+        window[-1] = frame
+        if frames_until > 0:
+            frames_until -= 1
+            continue
+        frames_until = infer_stride - 1
+        interp.set_tensor(input_index, window.reshape(1, time_steps, feat_dim))
+        interp.invoke()
+        n_infer += 1
+        last = interp.get_tensor(output_index)[0]
+        prob = float(softmax(last)[SIRI_INDEX])
+        if prob > max_prob:
+            max_prob = prob
+        if prob >= wake_threshold:
+            hits += 1
+            if hits >= wake_hits:
+                woke = True
+                break
+        else:
+            hits = 0
+    return woke, max_prob, last, n_infer
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default="/mnt/e/kwsDataSet/produce")
@@ -134,12 +192,16 @@ def main():
     )
     parser.add_argument(
         "--model-dir",
-        default="/home/wdf/kws_work/models/siri_bc_resnet2_run",
+        default="/home/wdf/kws_work/models/siri_bc_resnet2_siri4500",
     )
-    parser.add_argument("--backend", choices=("keras", "tflite"), default="keras")
+    parser.add_argument("--backend", choices=("keras", "tflite"), default="tflite")
+    parser.add_argument("--mode", choices=("clip", "wake"), default="wake",
+                        help="clip: one 1s forward. wake: C++ sliding-window debounce.")
+    parser.add_argument("--split", choices=("all", "training", "validation", "testing"),
+                        default="testing")
     parser.add_argument("--keyword", default="siri")
-    parser.add_argument("--max-per-label", type=int, default=80,
-                        help="Cap negative labels; keyword folder is never capped unless --max-keyword. 0 = all files.")
+    parser.add_argument("--max-per-label", type=int, default=0,
+                        help="Cap negative labels. 0 = all files.")
     parser.add_argument("--max-keyword", type=int, default=0,
                         help="Optional cap on keyword clips. 0 = all keyword files.")
     parser.add_argument("--sample-rate", type=int, default=16000)
@@ -150,6 +212,11 @@ def main():
     parser.add_argument("--mel-hi", type=float, default=7600.0)
     parser.add_argument("--mel-bins", type=int, default=40)
     parser.add_argument("--dct-bins", type=int, default=20)
+    parser.add_argument("--infer-stride", type=int, default=4)
+    parser.add_argument("--wake-threshold", type=float, default=0.90)
+    parser.add_argument("--wake-hits", type=int, default=2)
+    parser.add_argument("--tail-frames", type=int, default=8,
+                        help="Silence frames appended after each clip (mic stays on).")
     args = parser.parse_args()
 
     if args.keyword != "siri":
@@ -160,6 +227,7 @@ def main():
     interp = None
     input_index = output_index = None
     tflite_clip = False
+    time_steps = feat_dim = None
     if args.backend == "keras":
         keras_model = load_keras_model(args.model_dir)
         log(f"backend=keras weights={args.model_dir}/best_weights")
@@ -170,136 +238,140 @@ def main():
         output_index = interp.get_output_details()[0]["index"]
         in_shape = interp.get_input_details()[0]["shape"]
         tflite_clip = len(in_shape) >= 3 and int(in_shape[1]) > 1
+        time_steps = int(in_shape[1])
+        feat_dim = int(in_shape[2]) if len(in_shape) >= 3 else int(in_shape[-1])
         log(f"backend=tflite model={args.tflite}")
         log(f"input={in_shape} output={interp.get_output_details()[0]['shape']} clip={tflite_clip}")
 
-    dataset = list_dataset(args.data_dir, args.keyword, args.max_per_label, args.max_keyword)
+    if args.mode == "wake" and args.backend == "tflite" and not tflite_clip:
+        log("ERROR: wake mode needs a clip TFLite input [1, 50, 20]")
+        return 1
+
+    dataset = list_dataset(
+        args.data_dir, args.keyword, args.max_per_label, args.max_keyword, args.split)
     total_files = sum(len(wavs) for _, wavs in dataset)
-    log(f"labels={len(dataset)} files={total_files} max_per_label={args.max_per_label}")
+    log(f"split={args.split} mode={args.mode} labels={len(dataset)} files={total_files}")
+    if args.mode == "wake":
+        log(f"wake: stride={args.infer_stride} thr={args.wake_threshold} "
+            f"hits={args.wake_hits} tail_frames={args.tail_frames}")
 
     stats = {}
     done = 0
     skipped = 0
     for label, wavs in dataset:
+        wakes = 0
         hits_last = 0
-        hits_max = 0
         scores = []
         probs = []
-        feats = []
         for path in wavs:
             done += 1
             try:
-                pcm = read_wav_pcm16(path, args.sample_rate, args.clip_samples)
-                feats.append(
-                    pcm_to_mfcc(
-                        pcm,
-                        args.sample_rate,
-                        args.window_size,
-                        args.window_stride,
-                        args.mel_lo,
-                        args.mel_hi,
-                        args.mel_bins,
-                        args.dct_bins,
-                    )
+                if args.mode == "wake":
+                    pcm = read_wav_pcm16(
+                        path, args.sample_rate, min_samples=args.clip_samples, truncate=False)
+                    if args.tail_frames > 0:
+                        pcm = np.pad(pcm, (0, args.tail_frames * args.window_stride))
+                else:
+                    pcm = read_wav_pcm16(
+                        path, args.sample_rate, min_samples=args.clip_samples, truncate=True)
+                mfcc = pcm_to_mfcc(
+                    pcm,
+                    args.sample_rate,
+                    args.window_size,
+                    args.window_stride,
+                    args.mel_lo,
+                    args.mel_hi,
+                    args.mel_bins,
+                    args.dct_bins,
                 )
             except Exception as exc:  # noqa: BLE001
                 skipped += 1
                 log(f"SKIP {path}: {exc}")
-            if done % 1000 == 0:
-                log(f"progress {done}/{total_files}")
-        results = []
-        if args.backend == "keras":
-            for feat in feats:
-                last = keras_model(feat[np.newaxis, ...], training=False).numpy()[0]
+                continue
+
+            if args.mode == "wake":
+                woke, max_prob, last, _n_infer = run_clip_wake(
+                    interp, input_index, output_index, mfcc, time_steps, feat_dim,
+                    args.infer_stride, args.wake_threshold, args.wake_hits)
+                if woke:
+                    wakes += 1
+                probs.append(max_prob)
+                scores.append(float(last[SIRI_INDEX]) if last is not None else 0.0)
+            elif args.backend == "keras":
+                last = keras_model(mfcc[np.newaxis, ...], training=False).numpy()[0]
                 prob = float(softmax(last)[SIRI_INDEX])
-                results.append((last, float(last[SIRI_INDEX]), prob))
-        else:
-            in_shape = interp.get_input_details()[0]["shape"]
-            for feat in feats:
-                if tflite_clip:
-                    results.append(
-                        run_clip_tflite(
-                            interp,
-                            input_index,
-                            output_index,
-                            feat,
-                            int(in_shape[1]),
-                            int(in_shape[2]),
-                        )
-                    )
-                else:
-                    results.append(run_stream(interp, input_index, output_index, feat))
-        for last, max_siri, max_prob in results:
-            pred_last = int(np.argmax(last))
-            if pred_last == SIRI_INDEX or (
-                max_siri > float(np.max(np.delete(last, SIRI_INDEX)))
-            ):
-                pred_max = SIRI_INDEX
+                if int(np.argmax(last)) == SIRI_INDEX:
+                    hits_last += 1
+                probs.append(prob)
+                scores.append(float(last[SIRI_INDEX]))
             else:
-                pred_max = pred_last
-            if pred_last == SIRI_INDEX:
-                hits_last += 1
-            if pred_max == SIRI_INDEX:
-                hits_max += 1
-            scores.append(max_siri)
-            probs.append(max_prob)
-        n = len(scores)
+                if tflite_clip:
+                    last, max_siri, max_prob = run_clip_tflite(
+                        interp, input_index, output_index, mfcc, time_steps, feat_dim)
+                else:
+                    last, max_siri, max_prob = run_stream(
+                        interp, input_index, output_index, mfcc)
+                if int(np.argmax(last)) == SIRI_INDEX:
+                    hits_last += 1
+                probs.append(max_prob)
+                scores.append(max_siri)
+
+            if done % 200 == 0:
+                log(f"progress {done}/{total_files}")
+
+        n = len(probs)
         stats[label] = {
             "n": n,
+            "wakes": wakes,
             "hit_last": hits_last,
-            "hit_max": hits_max,
-            "mean_siri_logit": float(np.mean(scores)) if n else 0.0,
             "mean_siri_prob": float(np.mean(probs)) if n else 0.0,
             "probs": probs,
         }
+        if n:
+            hit = wakes if args.mode == "wake" else hits_last
+            log(f"done {label}: {hit}/{n} = {hit / n:.2%}")
 
     pos = stats.get(args.keyword)
     if not pos or pos["n"] == 0:
         log(f"ERROR: no usable {args.keyword} clips")
         return 1
 
+    hit_key = "wakes" if args.mode == "wake" else "hit_last"
+    title = (
+        f"=== realtime wake (stride={args.infer_stride} thr={args.wake_threshold} "
+        f"hits={args.wake_hits}) ==="
+        if args.mode == "wake"
+        else "=== clip classification (argmax) ==="
+    )
     log("")
-    log("=== clip classification (last frame argmax) ===")
-    log(f"{'label':<16} {'n':>6} {'pred_siri':>10} {'rate':>8} {'mean_p':>8}")
+    log(title)
+    log(f"{'label':<16} {'n':>6} {'wake':>8} {'rate':>8} {'mean_p':>8}")
     neg_n = 0
     neg_fa = 0
     for label, st in stats.items():
-        rate = st["hit_last"] / st["n"] if st["n"] else 0.0
-        log(f"{label:<16} {st['n']:6d} {st['hit_last']:10d} {rate:8.2%} {st['mean_siri_prob']:8.3f}")
+        hit = st[hit_key]
+        rate = hit / st["n"] if st["n"] else 0.0
+        log(f"{label:<16} {st['n']:6d} {hit:8d} {rate:8.2%} {st['mean_siri_prob']:8.3f}")
         if label != args.keyword:
             neg_n += st["n"]
-            neg_fa += st["hit_last"]
+            neg_fa += hit
 
-    recall = pos["hit_last"] / pos["n"]
+    recall = pos[hit_key] / pos["n"]
     far = neg_fa / neg_n if neg_n else 0.0
     log("")
-    log(f"siri recall (last-frame argmax) = {recall:.2%}  ({pos['hit_last']}/{pos['n']})")
-    log(f"false accept (other words)      = {far:.2%}  ({neg_fa}/{neg_n})")
-
-    log("")
-    log("=== threshold sweep on max-over-time siri softmax ===")
-    pos_p = np.array(pos["probs"], dtype=np.float32)
-    neg_p = np.concatenate(
-        [np.array(st["probs"], dtype=np.float32) for lab, st in stats.items() if lab != args.keyword]
-    ) if neg_n else np.array([], dtype=np.float32)
-    log(f"{'thr':>6} {'recall':>8} {'FAR':>8} {'TP':>6} {'FN':>6} {'FP':>6} {'TN':>6}")
-    for thr in (0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95):
-        tp = int(np.sum(pos_p >= thr))
-        fn = pos["n"] - tp
-        fp = int(np.sum(neg_p >= thr)) if neg_p.size else 0
-        tn = neg_n - fp
-        log(f"{thr:6.2f} {tp / pos['n']:8.2%} {fp / neg_n if neg_n else 0:8.2%} {tp:6d} {fn:6d} {fp:6d} {tn:6d}")
+    log(f"siri wake/recall = {recall:.2%}  ({pos[hit_key]}/{pos['n']})")
+    log(f"false accept     = {far:.2%}  ({neg_fa}/{neg_n})")
 
     dangerous = [
         (lab, st) for lab, st in stats.items()
-        if lab != args.keyword and st["n"] and st["hit_last"] / st["n"] >= 0.05
+        if lab != args.keyword and st["n"] and st[hit_key] / st["n"] >= 0.05
     ]
-    dangerous.sort(key=lambda kv: kv[1]["hit_last"] / kv[1]["n"], reverse=True)
+    dangerous.sort(key=lambda kv: kv[1][hit_key] / kv[1]["n"], reverse=True)
     if dangerous:
         log("")
         log("=== high false-accept labels (>=5%) ===")
         for lab, st in dangerous[:20]:
-            log(f"  {lab:<16} {st['hit_last']}/{st['n']} = {st['hit_last']/st['n']:.2%}")
+            log(f"  {lab:<16} {st[hit_key]}/{st['n']} = {st[hit_key]/st['n']:.2%}")
 
     log(f"\nskipped={skipped}")
     return 0
